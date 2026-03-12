@@ -103,8 +103,6 @@ def load_station_stack(station_coords: tuple, catalog) -> xr.Dataset | None:
     """
     bb = bbox_from_coords(station_coords, 8000)
 
-
-
     items = catalog.search(
         collections=["landsat-c2-l2"],
         bbox=bb,
@@ -473,34 +471,66 @@ if __name__ == "__main__":
     )
     print(f"Stations to process: {len(station_groups)}")
 
-    # 4 workers: each holds one full in-memory stack (~150MB).
-    # More workers = more parallel but more RAM pressure.
-    cluster = LocalCluster(n_workers=8, threads_per_worker=4)
+    cluster = LocalCluster(n_workers=4, threads_per_worker=2)
     client  = Client(cluster)
     print(client.dashboard_link)
 
-    sid = 126
+    import os
 
-    tasks = [
-        process_station((train_set["Latitude"].iloc[sid], train_set["Longitude"].iloc[sid]),
-    train_set[
-        (train_set["Latitude"] == train_set["Latitude"].iloc[sid]) &
-        (train_set["Longitude"] == train_set["Longitude"].iloc[sid])
-    ]["Sample Date dt"].tolist(),
-    catalog,)
-            ]
-    t0      = time.perf_counter()
-    results = compute(*tasks)
-    elapsed = time.perf_counter() - t0
-    print(f"\nCompleted in {elapsed:.0f}s  ({elapsed/3600:.1f} hrs)")
+    OUTPUT_DIR = "ls_station_outputs"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    all_rows   = [row for station_rows in results for row in station_rows]
-    output_df  = pd.DataFrame(all_rows)
-    output_df.to_csv(f"ls_features_s{sid+1}.csv", index=False)
+    BATCH_SIZE = 5
+    all_sids = list(range(len(station_groups)))
+    batches = [all_sids[i:i + BATCH_SIZE] for i in range(0, len(all_sids), BATCH_SIZE)]
 
-    print(f"Saved: ls_features_s{sid+1}.csv")
-    print(f"Rows: {len(output_df)} | Features: {len(output_df.columns)}")
-    print(list(output_df.columns))
+    for batch_num, batch in enumerate(batches):
+        pending = [
+            sid for sid in batch
+            if not os.path.exists(f"{OUTPUT_DIR}/ls_station_{sid}.csv")
+        ]
 
-    client.close()
-    cluster.close()
+        if not pending:
+            print(f"Batch {batch_num + 1}/{len(batches)} — all done, skipping.")
+            continue
+
+        print(f"\nBatch {batch_num + 1}/{len(batches)} — processing {len(pending)} stations…")
+
+        tasks = {}
+        for sid in pending:
+            row = station_groups.iloc[sid]
+            tasks[sid] = process_station(
+                (row["Latitude"], row["Longitude"]),
+                row["Sample Date dt"],
+                catalog,
+            )
+
+        t0 = time.perf_counter()
+        try:
+            sids_list = list(tasks.keys())
+            results_list = compute(*tasks.values())
+
+            for sid, result in zip(sids_list, results_list):
+                output_path = f"{OUTPUT_DIR}/ls_station_{sid}.csv"
+                pd.DataFrame(result).to_csv(output_path, index=False)
+                print(f"  station {sid} saved → {output_path}")
+
+        except Exception as e:
+            print(f"  Batch failed ({e}) — retrying individually…")
+            for sid in pending:
+                output_path = f"{OUTPUT_DIR}/ls_station_{sid}.csv"
+                if os.path.exists(output_path):
+                    continue
+                row = station_groups.iloc[sid]
+                try:
+                    result = compute(process_station(
+                        (row["Latitude"], row["Longitude"]),
+                        row["Sample Date dt"],
+                        catalog,
+                    ))[0]
+                    pd.DataFrame(result).to_csv(output_path, index=False)
+                    print(f"  station {sid} saved (retry)")
+                except Exception as e2:
+                    print(f"  station {sid} FAILED: {e2}")
+
+        print(f"Batch {batch_num + 1} done in {time.perf_counter() - t0:.0f}s")
