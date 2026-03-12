@@ -111,7 +111,7 @@ def load_station_stack(station_coords: tuple, catalog) -> xr.Dataset | None:
         datetime=f"{OBS_START}/{OBS_END}",
         query={
             "platform":       {"in": ["landsat-7", "landsat-8"]},
-            "eo:cloud_cover": {"lt": 20},
+            "eo:cloud_cover": {"lt":20},
         },
     ).item_collection()
 
@@ -479,8 +479,7 @@ if __name__ == "__main__":
     client  = Client(cluster)
     print(client.dashboard_link)
 
-    sid = 155
-
+    sid = 126
 
     tasks = [
         process_station((train_set["Latitude"].iloc[sid], train_set["Longitude"].iloc[sid]),
